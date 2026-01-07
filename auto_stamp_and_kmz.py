@@ -616,6 +616,19 @@ def stamp_from_open_image(img0: "Image.Image", in_path: Path, out_path: Path) ->
         return None
 
 
+def make_thumb_png_bytes_from_image(img: "Image.Image", size: int = THUMB_SIZE) -> Optional[bytes]:
+    try:
+        im = img
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGB")
+        thumb = ImageOps.fit(im, (size, size), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+        buf = io.BytesIO()
+        thumb.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
 def make_thumb_png_bytes_from_stamped(stamped_img_path: Path, size: int = THUMB_SIZE) -> Optional[bytes]:
     try:
         with Image.open(stamped_img_path) as im0:
@@ -624,12 +637,7 @@ def make_thumb_png_bytes_from_stamped(stamped_img_path: Path, size: int = THUMB_
             except Exception:
                 pass
             im = ImageOps.exif_transpose(im0)
-            if im.mode not in ("RGB", "RGBA"):
-                im = im.convert("RGB")
-            thumb = ImageOps.fit(im, (size, size), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
-            buf = io.BytesIO()
-            thumb.save(buf, format="PNG", optimize=True)
-            return buf.getvalue()
+            return make_thumb_png_bytes_from_image(im, size=size)
     except Exception:
         return None
 
@@ -841,14 +849,15 @@ def process_one_photo(
     orig_path: Path,
     stamped_path: Path,
     cancel_event: threading.Event,
-) -> Tuple[str, Optional[Tuple[float, float, float]], bool, Optional[str]]:
+) -> Tuple[str, Optional[Tuple[float, float, float]], bool, Optional[bytes], Optional[str]]:
     try:
         if cancel_event.is_set():
-            return orig_path.name, None, False, "Cancelled"
+            return orig_path.name, None, False, None, "Cancelled"
 
         orig_mtime = orig_path.stat().st_mtime
         stamped_exists = stamped_path.exists()
         stamped_changed = False
+        thumb_bytes: Optional[bytes] = None
 
         with Image.open(orig_path) as img0:
             gps = get_gps_from_exif(img0)
@@ -857,13 +866,14 @@ def process_one_photo(
             if do_stamp:
                 stamped_img_rgb = stamp_from_open_image(img0, orig_path, stamped_path)
                 if stamped_img_rgb is None:
-                    return orig_path.name, gps, False, "Stamp failed"
+                    return orig_path.name, gps, False, None, "Stamp failed"
                 stamped_changed = True
+                thumb_bytes = make_thumb_png_bytes_from_image(stamped_img_rgb, THUMB_SIZE)
 
-            return orig_path.name, gps, stamped_changed, None
+            return orig_path.name, gps, stamped_changed, thumb_bytes, None
 
     except Exception as e:
-        return orig_path.name, None, False, str(e)
+        return orig_path.name, None, False, None, str(e)
 
 
 # ---------------------------
@@ -875,6 +885,7 @@ def build_geoset_kmz_grouped(
     groups: Dict[str, List[str]],  # folder -> filenames
     photo_gps: Dict[str, Tuple[float, float, float]],
     stamped_files_resolver,        # callable(fname)->Path
+    thumb_bytes_by_name: Optional[Dict[str, bytes]] = None,
     show_labels: bool = True,
 ) -> Tuple[int, int]:
     label_scale = "1.0" if show_labels else "0.0"
@@ -962,7 +973,11 @@ def build_geoset_kmz_grouped(
             if img_path and Path(img_path).exists():
                 z.write(str(img_path), arcname=f"files/{fname}")
 
-                thumb_bytes = make_thumb_png_bytes_from_stamped(Path(img_path), THUMB_SIZE)
+                thumb_bytes = None
+                if thumb_bytes_by_name:
+                    thumb_bytes = thumb_bytes_by_name.get(fname)
+                if thumb_bytes is None:
+                    thumb_bytes = make_thumb_png_bytes_from_stamped(Path(img_path), THUMB_SIZE)
                 if thumb_bytes:
                     z.writestr(f"thumbs/{Path(fname).stem}.png", thumb_bytes)
 
@@ -1670,6 +1685,7 @@ class App:
             cache_dir.mkdir(exist_ok=True)
 
             photo_gps: Dict[str, Tuple[float, float, float]] = {}
+            photo_thumbs: Dict[str, bytes] = {}
 
             def assign_groups(fname: str, gps: Optional[Tuple[float, float, float]]) -> List[str]:
                 if not gps:
@@ -1699,10 +1715,13 @@ class App:
                     if self.cancel_event.is_set():
                         break
 
-                    fname, gps, stamped_changed, err = fut.result()
+                    fname, gps, stamped_changed, thumb_bytes, err = fut.result()
 
                     if gps:
                         photo_gps[fname] = gps
+
+                    if thumb_bytes:
+                        photo_thumbs[fname] = thumb_bytes
 
                     if err:
                         self.q.put(("log", f"  [WARN] {fname}: {err}"))
@@ -1756,6 +1775,7 @@ class App:
                 groups=groups_for_kmz,
                 photo_gps=photo_gps,
                 stamped_files_resolver=stamped_resolver,
+                thumb_bytes_by_name=photo_thumbs,
                 show_labels=True,
             )
             self.q.put(("kmz_ready", str(kmz_out)))
