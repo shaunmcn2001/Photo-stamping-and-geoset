@@ -136,7 +136,7 @@ Workflow folder:
 
 How to use:
   1) Run: {scripts}\\RUN_ONE_CLICK.bat
-  2) Click "Create New Job..." and import photos, folders, or ZIPs
+  2) Click "Create New Job..." or "New Job from Folder..." (or drag-drop onto the main window)
   3) Select the job in the dropdown
   4) (Optional) tick "Sort by boundary KMZ" and choose boundary KMZ
   5) Click Start (only the selected job is processed)
@@ -657,6 +657,79 @@ def ensure_originals_folder(job_dir: Path) -> Path:
     return originals
 
 
+def allocate_job_dir(workflow_root: Path, raw_name: str) -> Path:
+    job_name = sanitize_folder_name(raw_name, fallback="Job")
+    job_dir = workflow_root / job_name
+    if job_dir.exists():
+        i = 1
+        while True:
+            candidate = workflow_root / f"{job_name}_{i}"
+            if not candidate.exists():
+                job_dir = candidate
+                break
+            i += 1
+    return job_dir
+
+
+def collect_imports_from_folder(folder: Path) -> Tuple[List[str], List[str]]:
+    images: List[str] = []
+    zips: List[str] = []
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            ext = Path(name).suffix.lower()
+            full = Path(root) / name
+            if ext in IMAGE_EXTS:
+                images.append(str(full))
+            elif ext == ".zip":
+                zips.append(str(full))
+    return images, zips
+
+
+def create_job_from_imports(
+    workflow_root: Path,
+    raw_name: str,
+    files: List[str],
+    zips: List[str],
+    warn=None,
+) -> Tuple[Path, int, int]:
+    job_dir = allocate_job_dir(workflow_root, raw_name)
+
+    originals_dir = job_dir / "Originals"
+    originals_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "Stamped").mkdir(exist_ok=True)
+
+    copied = 0
+    skipped = 0
+
+    for f in files:
+        src = Path(f)
+        if not src.exists() or src.suffix.lower() not in IMAGE_EXTS:
+            skipped += 1
+            continue
+        dst = unique_dest_path(originals_dir, src.name)
+        try:
+            shutil.copy2(str(src), str(dst))
+            copied += 1
+        except Exception:
+            skipped += 1
+
+    for z in zips:
+        zp = Path(z)
+        if not zp.exists() or zp.suffix.lower() != ".zip":
+            skipped += 1
+            continue
+        try:
+            c, s = import_zip_to_originals(zp, originals_dir)
+            copied += c
+            skipped += s
+        except Exception as e:
+            skipped += 1
+            if warn:
+                warn(f"Failed to import:\n{zp}\n\n{e}")
+
+    return job_dir, copied, skipped
+
+
 # ---------------------------
 # Boundary KMZ parsing + matching (sorting mode)
 # ---------------------------
@@ -1016,7 +1089,13 @@ class LogWindow:
 # GUI: New Job Dialog
 # ---------------------------
 class NewJobDialog:
-    def __init__(self, parent: tk.Tk, workflow_root: Path):
+    def __init__(
+        self,
+        parent: tk.Tk,
+        workflow_root: Path,
+        initial_paths: Optional[List[str]] = None,
+        suggested_job_name: Optional[str] = None,
+    ):
         self.workflow_root = workflow_root
         self.result_job_dir: Optional[Path] = None
 
@@ -1027,7 +1106,7 @@ class NewJobDialog:
         self.win.transient(parent)
         self.win.grab_set()
 
-        self.job_name_var = tk.StringVar(value="")
+        self.job_name_var = tk.StringVar(value=suggested_job_name or "")
         self.files_set: set = set()
         self.zips_set: set = set()
 
@@ -1134,6 +1213,9 @@ class NewJobDialog:
         ttk.Button(btns, text="Cancel", command=self.cancel).pack(side="right")
         ttk.Button(btns, text="Create Job", command=self.create).pack(side="right", padx=(0, 10))
 
+        if initial_paths:
+            self._add_paths(initial_paths)
+
     def choose_files(self):
         paths = filedialog.askopenfilenames(
             title="Select original photos",
@@ -1195,17 +1277,7 @@ class NewJobDialog:
         return path.strip()
 
     def _collect_from_folder(self, folder: Path) -> Tuple[List[str], List[str]]:
-        images: List[str] = []
-        zips: List[str] = []
-        for root, _dirs, files in os.walk(folder):
-            for name in files:
-                ext = Path(name).suffix.lower()
-                full = Path(root) / name
-                if ext in IMAGE_EXTS:
-                    images.append(str(full))
-                elif ext == ".zip":
-                    zips.append(str(full))
-        return images, zips
+        return collect_imports_from_folder(folder)
 
     def _add_paths(self, paths: List[str]) -> None:
         for raw in paths:
@@ -1248,49 +1320,17 @@ class NewJobDialog:
             if not messagebox.askyesno("No imports selected", "No photos or ZIPs selected. Create empty job anyway?"):
                 return
 
-        job_name = sanitize_folder_name(raw, fallback="Job")
-        job_dir = self.workflow_root / job_name
-
-        if job_dir.exists():
-            i = 1
-            while True:
-                candidate = self.workflow_root / f"{job_name}_{i}"
-                if not candidate.exists():
-                    job_dir = candidate
-                    break
-                i += 1
-
-        originals_dir = job_dir / "Originals"
-        originals_dir.mkdir(parents=True, exist_ok=True)
-        (job_dir / "Stamped").mkdir(exist_ok=True)
-
-        copied = 0
-        skipped = 0
-
-        for f in sorted(self.files_set):
-            src = Path(f)
-            if not src.exists() or src.suffix.lower() not in IMAGE_EXTS:
-                skipped += 1
-                continue
-            dst = unique_dest_path(originals_dir, src.name)
-            try:
-                shutil.copy2(str(src), str(dst))
-                copied += 1
-            except Exception:
-                skipped += 1
-
-        for z in sorted(self.zips_set):
-            zp = Path(z)
-            if not zp.exists() or zp.suffix.lower() != ".zip":
-                skipped += 1
-                continue
-            try:
-                c, s = import_zip_to_originals(zp, originals_dir)
-                copied += c
-                skipped += s
-            except Exception as e:
-                skipped += 1
-                messagebox.showwarning("ZIP import failed", f"Failed to import:\n{zp}\n\n{e}")
+        try:
+            job_dir, copied, skipped = create_job_from_imports(
+                self.workflow_root,
+                raw,
+                sorted(self.files_set),
+                sorted(self.zips_set),
+                warn=lambda msg: messagebox.showwarning("ZIP import failed", msg),
+            )
+        except Exception as e:
+            messagebox.showerror("Job creation failed", str(e))
+            return
 
         self.result_job_dir = job_dir
         messagebox.showinfo(
@@ -1319,6 +1359,8 @@ class App:
 
         self.workflow_root = get_workflow_root()
         self.last_kmz_path: Optional[Path] = None
+        self.last_job_dir: Optional[Path] = None
+        self.last_stamped_dir: Optional[Path] = None
 
         self.selected_job_var = tk.StringVar(value="")
         self.jobs_list: List[str] = []
@@ -1356,6 +1398,12 @@ class App:
             sticky="e",
             padx=(8, 0),
         )
+        ttk.Button(workflow, text="New Job from Folder...", command=self.create_new_job_from_folder).grid(
+            row=0,
+            column=4,
+            sticky="e",
+            padx=(8, 0),
+        )
 
         job = ttk.LabelFrame(frm, text="Job", padding=10)
         job.pack(fill="x", pady=(0, 8))
@@ -1367,6 +1415,35 @@ class App:
         self.jobs_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_job_selected())
         ttk.Button(job, text="Refresh", command=self.refresh_jobs).grid(row=0, column=2, sticky="e")
         ttk.Button(job, text="Open Job", command=self.open_selected_job).grid(row=0, column=3, sticky="e", padx=(8, 0))
+
+        quick = ttk.LabelFrame(frm, text="Quick Import", padding=10)
+        quick.pack(fill="x", pady=(0, 8))
+        quick.columnconfigure(0, weight=1)
+
+        drop_text = "Drop JPGs, ZIPs, or folders here to create a new job"
+        if not dnd_available():
+            drop_text = "Drag and drop disabled (tkinterdnd2 not installed)."
+
+        self.main_drop_label = tk.Label(
+            quick,
+            text=drop_text,
+            padx=8,
+            pady=14,
+            relief="groove",
+            bd=2,
+            anchor="center",
+        )
+        self.main_drop_label.grid(row=0, column=0, sticky="ew")
+
+        if dnd_available():
+            self._setup_main_dnd()
+        else:
+            ttk.Button(quick, text="Enable Drag and Drop", command=self.enable_main_dnd).grid(
+                row=1,
+                column=0,
+                sticky="w",
+                pady=(6, 0),
+            )
 
         sorting = ttk.LabelFrame(frm, text="Sorting (optional)", padding=10)
         sorting.pack(fill="x", pady=(0, 8))
@@ -1415,11 +1492,20 @@ class App:
         ttk.Button(btns, text="Show Terminal / Logs", command=self.show_logs).grid(row=0, column=0, sticky="w")
         self.open_kmz_btn = ttk.Button(btns, text="Open geoset.kmz", command=self.open_last_kmz, state="disabled")
         self.open_kmz_btn.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.open_stamped_btn = ttk.Button(btns, text="Open Stamped", command=self.open_last_stamped, state="disabled")
+        self.open_stamped_btn.grid(row=0, column=2, sticky="w", padx=(8, 0))
 
         self.cancel_btn = ttk.Button(btns, text="Cancel", command=self.cancel, state="disabled")
-        self.cancel_btn.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self.cancel_btn.grid(row=0, column=3, sticky="e", padx=(8, 0))
         self.start_btn = ttk.Button(btns, text="Start", command=self.start)
-        self.start_btn.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        self.start_btn.grid(row=0, column=4, sticky="e", padx=(8, 0))
+
+        summary = ttk.LabelFrame(frm, text="Summary", padding=10)
+        summary.pack(fill="x", pady=(8, 0))
+        summary.columnconfigure(0, weight=1)
+        self.summary_text = tk.Text(summary, height=5, wrap="word")
+        self.summary_text.grid(row=0, column=0, sticky="ew")
+        self.summary_text.configure(state="disabled")
 
         self._on_sort_toggle()
 
@@ -1505,8 +1591,44 @@ class App:
         self._open_path(job_dir)
 
     def create_new_job(self):
+        self._open_new_job_dialog()
+
+    def create_new_job_from_folder(self):
+        folder = filedialog.askdirectory(title="Select a folder to import")
+        if not folder:
+            return
+        src_folder = Path(folder)
+        files, zips = collect_imports_from_folder(src_folder)
+        if not files and not zips:
+            if not messagebox.askyesno(
+                "Empty folder",
+                "No JPGs or ZIPs found in that folder.\n\nCreate an empty job anyway?",
+            ):
+                return
+        try:
+            job_dir, copied, skipped = create_job_from_imports(
+                self.workflow_root,
+                src_folder.name or "Job",
+                sorted(files),
+                sorted(zips),
+                warn=lambda msg: messagebox.showwarning("ZIP import failed", msg),
+            )
+        except Exception as e:
+            messagebox.showerror("Job creation failed", str(e))
+            return
+
+        messagebox.showinfo(
+            "Job created",
+            f"Created:\n{job_dir}\n\nImported files: {copied}\nSkipped: {skipped}",
+        )
+        self.refresh_jobs()
+        self.selected_job_var.set(job_dir.name)
+        self._on_job_selected()
+        self._open_path(job_dir)
+
+    def _open_new_job_dialog(self, initial_paths: Optional[List[str]] = None, suggested_name: Optional[str] = None):
         self.workflow_root.mkdir(parents=True, exist_ok=True)
-        dlg = NewJobDialog(self.root, self.workflow_root)
+        dlg = NewJobDialog(self.root, self.workflow_root, initial_paths=initial_paths, suggested_job_name=suggested_name)
         self.root.wait_window(dlg.win)
 
         if dlg.result_job_dir is not None:
@@ -1523,6 +1645,68 @@ class App:
             messagebox.showerror("Missing KMZ", f"geoset.kmz not found:\n{self.last_kmz_path}")
             return
         self._open_path(self.last_kmz_path)
+
+    def open_last_stamped(self):
+        if not self.last_stamped_dir:
+            messagebox.showinfo("No output yet", "Run a job to generate Stamped output first.")
+            return
+        if not self.last_stamped_dir.exists():
+            messagebox.showerror("Missing folder", f"Stamped folder not found:\n{self.last_stamped_dir}")
+            return
+        self._open_path(self.last_stamped_dir)
+
+    def enable_main_dnd(self):
+        if ensure_dnd_or_prompt(self.root):
+            self.root.destroy()
+
+    def _setup_main_dnd(self):
+        try:
+            self.main_drop_label.drop_target_register(DND_FILES)
+            self.main_drop_label.dnd_bind("<<Drop>>", self._on_main_drop)
+        except Exception:
+            pass
+
+    def _on_main_drop(self, event):
+        data = event.data or ""
+        paths = [p for p in self._parse_drop_files(data) if p and Path(p).exists()]
+        if not paths:
+            return
+        suggested = self._suggest_job_name(paths)
+        self._open_new_job_dialog(initial_paths=paths, suggested_name=suggested)
+
+    def _parse_drop_files(self, data: str) -> List[str]:
+        try:
+            raw = list(self.root.tk.splitlist(data))
+        except Exception:
+            raw = [p for p in data.split() if p]
+        return [self._clean_drop_path(p) for p in raw if p]
+
+    @staticmethod
+    def _clean_drop_path(p: str) -> str:
+        path = (p or "").strip()
+        if path.lower().startswith("file://"):
+            path = path[7:]
+            if path.startswith("/"):
+                path = path[1:]
+        return path.strip()
+
+    @staticmethod
+    def _suggest_job_name(paths: List[str]) -> Optional[str]:
+        if len(paths) == 1:
+            p = Path(paths[0])
+            if p.is_dir():
+                return p.name
+            return p.parent.name
+        parents = {Path(p).parent for p in paths if Path(p).parent}
+        if len(parents) == 1:
+            return parents.pop().name
+        return None
+
+    def _set_summary_lines(self, lines: List[str]):
+        self.summary_text.configure(state="normal")
+        self.summary_text.delete("1.0", "end")
+        self.summary_text.insert("end", "\n".join(lines) if lines else "No summary yet.")
+        self.summary_text.configure(state="disabled")
 
     # ---- logs ----
     def show_logs(self):
@@ -1555,7 +1739,11 @@ class App:
 
         self.refresh_jobs()
         self.last_kmz_path = None
+        self.last_job_dir = None
+        self.last_stamped_dir = None
         self.open_kmz_btn.config(state="disabled")
+        self.open_stamped_btn.config(state="disabled")
+        self._set_summary_lines([])
 
         job_name = self.selected_job_var.get().strip()
         if not job_name:
@@ -1566,6 +1754,9 @@ class App:
         if not job_dir.exists():
             messagebox.showerror("Missing job folder", f"Job folder not found:\n{job_dir}")
             return
+
+        self.last_job_dir = job_dir
+        self.last_stamped_dir = job_dir / "Stamped"
 
         sorting = bool(self.sort_mode_var.get())
         boundary_kmz = self.boundary_kmz_var.get().strip()
@@ -1769,6 +1960,9 @@ class App:
             else:
                 groups_for_kmz = {"Photos": list(photo_gps.keys())}
 
+            summary_lines = [f"{k}: {len(v)}" for k, v in groups_for_kmz.items()]
+            self.q.put(("summary", summary_lines))
+
             placemarks, photos_used = build_geoset_kmz_grouped(
                 kmz_path=kmz_out,
                 doc_name=job_dir.name,
@@ -1807,6 +2001,8 @@ class App:
                     self.count_var.set(f"{d} / {t}")
                 elif kind == "log":
                     self._log(msg[1])
+                elif kind == "summary":
+                    self._set_summary_lines(msg[1])
                 elif kind == "kmz_ready":
                     self.last_kmz_path = Path(msg[1])
                     self.open_kmz_btn.config(state="normal")
@@ -1821,6 +2017,8 @@ class App:
                     self._finish_buttons()
                     self.status_var.set(msg[1])
                     self._log(f"=== {msg[1].upper()} ===")
+                    if msg[1] == "Done." and self.last_stamped_dir and self.last_stamped_dir.exists():
+                        self.open_stamped_btn.config(state="normal")
 
         except queue.Empty:
             pass

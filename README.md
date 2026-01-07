@@ -24,6 +24,8 @@ Then:
 2. Select the job and click **Start**.
 3. (Optional) Enable **Sort by Boundary KMZ**, pick the KMZ, set buffer distance, then **Start**.
 
+You can also use **New Job from Folder...** or drop files/folders onto the main window to create a job quickly.
+
 Workflow folder is created at `~/Downloads/Photo Processing` (with `Automation Scripts/` inside).
 If Python is not installed, the run scripts will open the Microsoft Store page for Python.
 
