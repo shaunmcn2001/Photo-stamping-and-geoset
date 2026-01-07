@@ -1,3 +1,4 @@
 Pillow>=9.0.0
 shapely>=2.0.0
 pyproj>=3.6.0
+tkinterdnd2>=0.3.0

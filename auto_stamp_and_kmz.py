@@ -51,6 +51,9 @@ Image = ImageDraw = ImageFont = ImageOps = ImageFilter = ExifTags = None
 # Shapely/pyproj globals (set after dependency check)
 Polygon = Point = unary_union = shp_transform = STRtree = Transformer = None
 
+# TkinterDnD globals (set after dependency check)
+TkinterDnD = DND_FILES = None
+
 
 # ---------------------------
 # Paths
@@ -83,13 +86,34 @@ def write_run_bat(scripts_dir: Path) -> None:
 setlocal
 cd /d "%~dp0"
 
+set "LOCAL_PY=%~dp0python"
+if exist "%LOCAL_PY%\pythonw.exe" (
+  "%LOCAL_PY%\pythonw.exe" auto_stamp_and_kmz.py
+  exit /b
+)
+if exist "%LOCAL_PY%\python.exe" (
+  "%LOCAL_PY%\python.exe" auto_stamp_and_kmz.py
+  exit /b
+)
+
 where pythonw >nul 2>&1
 if %errorlevel%==0 (
   pythonw auto_stamp_and_kmz.py
   exit /b
 )
 
-python auto_stamp_and_kmz.py
+where python >nul 2>&1
+if %errorlevel%==0 (
+  python auto_stamp_and_kmz.py
+  exit /b
+)
+
+echo Python was not found.
+echo Install Python from the Microsoft Store or enable App Execution Aliases.
+echo Opening Microsoft Store...
+start "" "ms-windows-store://pdp/?productid=9NRWMJP3717K"
+start "" "https://www.microsoft.com/store/apps/9NRWMJP3717K"
+pause
 endlocal
 """
     bat.write_text(bat_content, encoding="utf-8")
@@ -112,7 +136,7 @@ Workflow folder:
 
 How to use:
   1) Run: {scripts}\\RUN_ONE_CLICK.bat
-  2) Click "Create New Job..." and import photos or ZIPs
+  2) Click "Create New Job..." and import photos, folders, or ZIPs
   3) Select the job in the dropdown
   4) (Optional) tick "Sort by boundary KMZ" and choose boundary KMZ
   5) Click Start (only the selected job is processed)
@@ -128,7 +152,7 @@ NOTE:
     )
 
     req = scripts / "requirements.txt"
-    write_text_if_missing(req, "Pillow>=9.0.0\nshapely>=2.0.0\npyproj>=3.6.0\n")
+    write_text_if_missing(req, "Pillow>=9.0.0\nshapely>=2.0.0\npyproj>=3.6.0\ntkinterdnd2>=0.3.0\n")
 
     write_run_bat(scripts)
 
@@ -149,11 +173,30 @@ def module_exists(modname: str) -> bool:
     return importlib.util.find_spec(modname) is not None
 
 
+def pip_available() -> bool:
+    return module_exists("pip")
+
+
+def ensure_pip_or_prompt(parent: tk.Tk, reason: str) -> bool:
+    if pip_available():
+        return True
+    messagebox.showerror(
+        "pip not available",
+        reason
+        + "\n\nThis Python does not include pip, so installs cannot run.\n"
+        "Use Microsoft Store Python or add pip to a portable Python.",
+        parent=parent,
+    )
+    return False
+
+
 def run_pip_install(args: List[str]) -> Tuple[bool, str]:
     """
     Runs pip using *this* python.
     Uses --user for Store Python compatibility.
     """
+    if not pip_available():
+        return False, "pip is not available in this Python."
     cmd = [sys.executable, "-m", "pip"] + args
     try:
         p = subprocess.run(
@@ -199,6 +242,14 @@ def ensure_requirements_on_first_launch(parent: tk.Tk) -> None:
         missing.append("pyproj")
 
     if not missing:
+        if not pip_available():
+            messagebox.showwarning(
+                "pip missing",
+                "This Python does not include pip.\n\n"
+                "Install Microsoft Store Python or add pip to your portable Python "
+                "if you need to install extra packages.",
+                parent=parent,
+            )
         return
 
     msg = (
@@ -217,6 +268,9 @@ def ensure_requirements_on_first_launch(parent: tk.Tk) -> None:
             )
             raise SystemExit(1)
         return
+
+    if not ensure_pip_or_prompt(parent, "Installing requirements"):
+        raise SystemExit(1)
 
     run_pip_install(["install", "--user", "--upgrade", "pip"])
     ok, out = run_pip_install(["install", "--user", "-r", str(req_path)])
@@ -248,6 +302,9 @@ def ensure_sort_deps_or_prompt(parent: tk.Tk) -> bool:
     ):
         return False
 
+    if not ensure_pip_or_prompt(parent, "Sorting by Boundary KMZ"):
+        return False
+
     req_path = get_scripts_dir() / "requirements.txt"
     run_pip_install(["install", "--user", "--upgrade", "pip"])
     ok, out = run_pip_install(["install", "--user", "-r", str(req_path)])
@@ -263,6 +320,7 @@ def ensure_sort_deps_or_prompt(parent: tk.Tk) -> bool:
 def load_runtime_modules():
     global Image, ImageDraw, ImageFont, ImageOps, ImageFilter, ExifTags
     global Polygon, Point, unary_union, shp_transform, STRtree, Transformer
+    global TkinterDnD, DND_FILES
 
     from PIL import Image as _Image
     from PIL import ImageDraw as _ImageDraw
@@ -284,6 +342,58 @@ def load_runtime_modules():
         Polygon, Point, unary_union, shp_transform, STRtree, Transformer = (
             _Polygon, _Point, _unary_union, _shp_transform, _STRtree, _Transformer
         )
+
+    try:
+        if module_exists("tkinterdnd2"):
+            from tkinterdnd2 import TkinterDnD as _TkinterDnD, DND_FILES as _DND_FILES
+
+            TkinterDnD = _TkinterDnD
+            DND_FILES = _DND_FILES
+    except Exception:
+        TkinterDnD = None
+        DND_FILES = None
+
+
+def dnd_available() -> bool:
+    global TkinterDnD, DND_FILES
+    if TkinterDnD is not None and DND_FILES is not None:
+        return True
+    if not module_exists("tkinterdnd2"):
+        return False
+    try:
+        from tkinterdnd2 import TkinterDnD as _TkinterDnD, DND_FILES as _DND_FILES
+
+        TkinterDnD = _TkinterDnD
+        DND_FILES = _DND_FILES
+        return True
+    except Exception:
+        TkinterDnD = None
+        DND_FILES = None
+        return False
+
+
+def ensure_dnd_or_prompt(parent: tk.Tk) -> bool:
+    if dnd_available():
+        return True
+
+    if not messagebox.askyesno(
+        "Enable drag and drop",
+        "Drag and drop needs tkinterdnd2.\n\nInstall it now?",
+        parent=parent,
+    ):
+        return False
+
+    if not ensure_pip_or_prompt(parent, "Drag and drop"):
+        return False
+
+    ok, out = run_pip_install(["install", "--user", "tkinterdnd2"])
+    if not ok:
+        messagebox.showerror("Install failed", out or "(no output)", parent=parent)
+        return False
+
+    messagebox.showinfo("Installed", "Drag and drop installed.\n\nRestarting now...", parent=parent)
+    restart_self()
+    return True
 
 
 # ---------------------------
@@ -897,51 +1007,114 @@ class NewJobDialog:
 
         self.win = tk.Toplevel(parent)
         self.win.title("Create New Job")
-        self.win.geometry("720x360")
+        self.win.geometry("760x480")
         self.win.resizable(False, False)
         self.win.transient(parent)
         self.win.grab_set()
 
         self.job_name_var = tk.StringVar(value="")
-        self.files: List[str] = []
-        self.zips: List[str] = []
+        self.files_set: set = set()
+        self.zips_set: set = set()
 
         frm = ttk.Frame(self.win, padding=14)
         frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+        frm.columnconfigure(2, weight=1)
 
-        ttk.Label(frm, text="Create a new job folder and import photos", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        ttk.Label(frm, text="Create a new job folder and import photos", font=("Segoe UI", 12, "bold")).grid(
+            row=0,
+            column=0,
+            columnspan=3,
+            sticky="w",
+        )
 
-        row1 = ttk.Frame(frm)
-        row1.pack(fill="x", pady=(12, 8))
-        ttk.Label(row1, text="Job name:").pack(side="left")
-        ttk.Entry(row1, textvariable=self.job_name_var).pack(side="left", padx=(8, 8), fill="x", expand=True)
+        ttk.Label(frm, text="Job name:").grid(row=1, column=0, sticky="w", pady=(12, 8))
+        ttk.Entry(frm, textvariable=self.job_name_var).grid(
+            row=1,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            padx=(8, 0),
+            pady=(12, 8),
+        )
 
-        row2 = ttk.Frame(frm)
-        row2.pack(fill="x", pady=(4, 6))
-        ttk.Label(row2, text="Add JPGs:").pack(side="left")
-        ttk.Button(row2, text="Choose Photos…", command=self.choose_files).pack(side="left", padx=(8, 8))
-        ttk.Button(row2, text="Clear", command=self.clear_files).pack(side="left")
+        import_frame = ttk.LabelFrame(frm, text="Import", padding=10)
+        import_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 8))
+        import_frame.columnconfigure(1, weight=1)
+        import_frame.columnconfigure(2, weight=1)
+        import_frame.columnconfigure(3, weight=1)
 
-        self.files_label = ttk.Label(frm, text="No photos selected.", wraplength=690)
-        self.files_label.pack(anchor="w", pady=(0, 10))
+        ttk.Label(import_frame, text="Photos:").grid(row=0, column=0, sticky="w")
+        ttk.Button(import_frame, text="Choose Photos...", command=self.choose_files).grid(
+            row=0,
+            column=1,
+            sticky="w",
+        )
+        ttk.Button(import_frame, text="Choose Folder...", command=self.choose_folder).grid(
+            row=0,
+            column=2,
+            sticky="w",
+            padx=(6, 0),
+        )
+        ttk.Button(import_frame, text="Clear Photos", command=self.clear_files).grid(row=0, column=3, sticky="w")
 
-        row3 = ttk.Frame(frm)
-        row3.pack(fill="x", pady=(4, 6))
-        ttk.Label(row3, text="Add ZIPs:").pack(side="left")
-        ttk.Button(row3, text="Choose ZIPs…", command=self.choose_zips).pack(side="left", padx=(18, 8))
-        ttk.Button(row3, text="Clear", command=self.clear_zips).pack(side="left")
+        ttk.Label(import_frame, text="ZIPs:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Button(import_frame, text="Choose ZIPs...", command=self.choose_zips).grid(
+            row=1,
+            column=1,
+            sticky="w",
+            pady=(6, 0),
+        )
+        ttk.Button(import_frame, text="Clear ZIPs", command=self.clear_zips).grid(
+            row=1,
+            column=3,
+            sticky="w",
+            pady=(6, 0),
+        )
 
-        self.zips_label = ttk.Label(frm, text="No ZIPs selected.", wraplength=690)
-        self.zips_label.pack(anchor="w", pady=(0, 8))
+        drop_frame = ttk.Frame(import_frame)
+        drop_frame.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        drop_frame.columnconfigure(0, weight=1)
+
+        drop_text = "Drop JPGs, ZIPs, or folders here"
+        if not dnd_available():
+            drop_text = "Drag and drop disabled (tkinterdnd2 not installed)."
+
+        self.drop_label = tk.Label(
+            drop_frame,
+            text=drop_text,
+            padx=8,
+            pady=14,
+            relief="groove",
+            bd=2,
+            anchor="center",
+        )
+        self.drop_label.grid(row=0, column=0, sticky="ew")
+
+        if dnd_available():
+            self._setup_dnd()
+        else:
+            ttk.Button(drop_frame, text="Enable Drag and Drop", command=self.enable_dnd).grid(
+                row=1,
+                column=0,
+                sticky="w",
+                pady=(6, 0),
+            )
+
+        self.files_label = ttk.Label(import_frame, text="0 photo(s) selected.", wraplength=690)
+        self.files_label.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        self.zips_label = ttk.Label(import_frame, text="0 ZIP(s) selected.", wraplength=690)
+        self.zips_label.grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         ttk.Label(
-            frm,
+            import_frame,
             text="ZIPs: Only .jpg/.jpeg are imported. Folder paths inside ZIP are ignored.",
             wraplength=690,
-        ).pack(anchor="w", pady=(8, 0))
+        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         btns = ttk.Frame(frm)
-        btns.pack(fill="x", pady=(18, 0))
+        btns.grid(row=3, column=0, columnspan=3, sticky="e", pady=(12, 0))
 
         ttk.Button(btns, text="Cancel", command=self.cancel).pack(side="right")
         ttk.Button(btns, text="Create Job", command=self.create).pack(side="right", padx=(0, 10))
@@ -952,12 +1125,11 @@ class NewJobDialog:
             filetypes=[("JPEG photos", "*.jpg *.jpeg"), ("All files", "*.*")],
         )
         if paths:
-            self.files = list(paths)
-            self.files_label.configure(text=f"{len(self.files)} photo(s) selected.")
+            self._add_paths(list(paths))
 
     def clear_files(self):
-        self.files = []
-        self.files_label.configure(text="No photos selected.")
+        self.files_set = set()
+        self._update_labels()
 
     def choose_zips(self):
         paths = filedialog.askopenfilenames(
@@ -965,12 +1137,87 @@ class NewJobDialog:
             filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")],
         )
         if paths:
-            self.zips = list(paths)
-            self.zips_label.configure(text=f"{len(self.zips)} ZIP(s) selected.")
+            self._add_paths(list(paths))
 
     def clear_zips(self):
-        self.zips = []
-        self.zips_label.configure(text="No ZIPs selected.")
+        self.zips_set = set()
+        self._update_labels()
+
+    def choose_folder(self):
+        path = filedialog.askdirectory(title="Select a folder to import")
+        if path:
+            self._add_paths([path])
+
+    def enable_dnd(self):
+        if ensure_dnd_or_prompt(self.win):
+            self.win.destroy()
+
+    def _setup_dnd(self):
+        try:
+            self.drop_label.drop_target_register(DND_FILES)
+            self.drop_label.dnd_bind("<<Drop>>", self._on_drop)
+        except Exception:
+            pass
+
+    def _on_drop(self, event):
+        data = event.data or ""
+        paths = self._parse_drop_files(data)
+        if paths:
+            self._add_paths(paths)
+
+    def _parse_drop_files(self, data: str) -> List[str]:
+        try:
+            return list(self.win.tk.splitlist(data))
+        except Exception:
+            return [p for p in data.split() if p]
+
+    def _clean_drop_path(self, p: str) -> str:
+        path = (p or "").strip()
+        if path.lower().startswith("file://"):
+            path = path[7:]
+            if path.startswith("/"):
+                path = path[1:]
+        return path.strip()
+
+    def _collect_from_folder(self, folder: Path) -> Tuple[List[str], List[str]]:
+        images: List[str] = []
+        zips: List[str] = []
+        for root, _dirs, files in os.walk(folder):
+            for name in files:
+                ext = Path(name).suffix.lower()
+                full = Path(root) / name
+                if ext in IMAGE_EXTS:
+                    images.append(str(full))
+                elif ext == ".zip":
+                    zips.append(str(full))
+        return images, zips
+
+    def _add_paths(self, paths: List[str]) -> None:
+        for raw in paths:
+            cleaned = self._clean_drop_path(raw)
+            if not cleaned:
+                continue
+            p = Path(cleaned)
+            if not p.exists():
+                continue
+            if p.is_dir():
+                imgs, zips = self._collect_from_folder(p)
+                for img in imgs:
+                    self.files_set.add(img)
+                for zp in zips:
+                    self.zips_set.add(zp)
+            else:
+                ext = p.suffix.lower()
+                if ext in IMAGE_EXTS:
+                    self.files_set.add(str(p))
+                elif ext == ".zip":
+                    self.zips_set.add(str(p))
+
+        self._update_labels()
+
+    def _update_labels(self):
+        self.files_label.configure(text=f"{len(self.files_set)} photo(s) selected.")
+        self.zips_label.configure(text=f"{len(self.zips_set)} ZIP(s) selected.")
 
     def cancel(self):
         self.result_job_dir = None
@@ -982,7 +1229,7 @@ class NewJobDialog:
             messagebox.showerror("Job name required", "Please enter a job name.")
             return
 
-        if not self.files and not self.zips:
+        if not self.files_set and not self.zips_set:
             if not messagebox.askyesno("No imports selected", "No photos or ZIPs selected. Create empty job anyway?"):
                 return
 
@@ -1005,7 +1252,7 @@ class NewJobDialog:
         copied = 0
         skipped = 0
 
-        for f in self.files:
+        for f in sorted(self.files_set):
             src = Path(f)
             if not src.exists() or src.suffix.lower() not in IMAGE_EXTS:
                 skipped += 1
@@ -1017,7 +1264,7 @@ class NewJobDialog:
             except Exception:
                 skipped += 1
 
-        for z in self.zips:
+        for z in sorted(self.zips_set):
             zp = Path(z)
             if not zp.exists() or zp.suffix.lower() != ".zip":
                 skipped += 1
@@ -1045,7 +1292,7 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Photo Stamp + KMZ Builder")
-        self.root.geometry("980x520")
+        self.root.geometry("1020x620")
         self.root.resizable(False, False)
 
         self.q: "queue.Queue[tuple]" = queue.Queue()
@@ -1056,6 +1303,7 @@ class App:
         self.log_buffer: List[str] = []
 
         self.workflow_root = get_workflow_root()
+        self.last_kmz_path: Optional[Path] = None
 
         self.selected_job_var = tk.StringVar(value="")
         self.jobs_list: List[str] = []
@@ -1073,71 +1321,90 @@ class App:
         frm = ttk.Frame(self.root, padding=14)
         frm.pack(fill="both", expand=True)
 
-        ttk.Label(frm, text="Photo Processing → Stamp + Geo KMZ", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        ttk.Label(frm, text="Photo Processing - Stamp + Geo KMZ", font=("Segoe UI", 14, "bold")).pack(anchor="w")
 
-        r0 = ttk.Frame(frm)
-        r0.pack(fill="x", pady=(8, 8))
-        ttk.Label(r0, text="Workflow folder:").pack(side="left")
-        ttk.Label(r0, text=str(self.workflow_root), wraplength=650).pack(side="left", padx=(8, 8), fill="x", expand=True)
-        ttk.Button(r0, text="Open", command=self._open_workflow_root).pack(side="left")
-        ttk.Button(r0, text="Create New Job…", command=self.create_new_job).pack(side="left", padx=(8, 0))
+        workflow = ttk.LabelFrame(frm, text="Workflow", padding=10)
+        workflow.pack(fill="x", pady=(8, 8))
+        workflow.columnconfigure(1, weight=1)
 
-        r1 = ttk.Frame(frm)
-        r1.pack(fill="x", pady=(0, 10))
-        ttk.Label(r1, text="Selected job:").pack(side="left")
+        ttk.Label(workflow, text="Workflow folder:").grid(row=0, column=0, sticky="w")
+        ttk.Label(workflow, text=str(self.workflow_root), wraplength=680).grid(
+            row=0,
+            column=1,
+            sticky="w",
+            padx=(8, 8),
+        )
+        ttk.Button(workflow, text="Open", command=self._open_workflow_root).grid(row=0, column=2, sticky="e")
+        ttk.Button(workflow, text="Create New Job...", command=self.create_new_job).grid(
+            row=0,
+            column=3,
+            sticky="e",
+            padx=(8, 0),
+        )
 
-        self.jobs_combo = ttk.Combobox(r1, textvariable=self.selected_job_var, state="readonly", values=[])
-        self.jobs_combo.pack(side="left", padx=(8, 8), fill="x", expand=True)
+        job = ttk.LabelFrame(frm, text="Job", padding=10)
+        job.pack(fill="x", pady=(0, 8))
+        job.columnconfigure(1, weight=1)
+
+        ttk.Label(job, text="Selected job:").grid(row=0, column=0, sticky="w")
+        self.jobs_combo = ttk.Combobox(job, textvariable=self.selected_job_var, state="readonly", values=[])
+        self.jobs_combo.grid(row=0, column=1, sticky="ew", padx=(8, 8))
         self.jobs_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_job_selected())
+        ttk.Button(job, text="Refresh", command=self.refresh_jobs).grid(row=0, column=2, sticky="e")
+        ttk.Button(job, text="Open Job", command=self.open_selected_job).grid(row=0, column=3, sticky="e", padx=(8, 0))
 
-        ttk.Button(r1, text="Refresh", command=self.refresh_jobs).pack(side="left")
-        ttk.Button(r1, text="Open Job", command=self.open_selected_job).pack(side="left", padx=(8, 0))
+        sorting = ttk.LabelFrame(frm, text="Sorting (optional)", padding=10)
+        sorting.pack(fill="x", pady=(0, 8))
+        sorting.columnconfigure(1, weight=1)
 
-        sep = ttk.Separator(frm)
-        sep.pack(fill="x", pady=(4, 10))
-
-        r2 = ttk.Frame(frm)
-        r2.pack(fill="x", pady=(0, 6))
         ttk.Checkbutton(
-            r2,
+            sorting,
             text="Sort stamped photos into property folders using Boundary KMZ",
             variable=self.sort_mode_var,
             command=self._on_sort_toggle,
-        ).pack(side="left")
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
 
-        r3 = ttk.Frame(frm)
-        r3.pack(fill="x", pady=(0, 6))
-        ttk.Label(r3, text="Boundary KMZ:").pack(side="left")
-        self.boundary_entry = ttk.Entry(r3, textvariable=self.boundary_kmz_var)
-        self.boundary_entry.pack(side="left", padx=(8, 8), fill="x", expand=True)
-        ttk.Button(r3, text="Browse…", command=self.choose_boundary_kmz).pack(side="left")
+        ttk.Label(sorting, text="Boundary KMZ:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.boundary_entry = ttk.Entry(sorting, textvariable=self.boundary_kmz_var)
+        self.boundary_entry.grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(6, 0))
+        self.boundary_btn = ttk.Button(sorting, text="Browse...", command=self.choose_boundary_kmz)
+        self.boundary_btn.grid(row=1, column=2, sticky="e", pady=(6, 0))
 
-        r4 = ttk.Frame(frm)
-        r4.pack(fill="x", pady=(0, 10))
-        ttk.Label(r4, text="Close-to-boundary distance (m):").pack(side="left")
-        self.buffer_spin = ttk.Spinbox(r4, from_=0, to=5000, textvariable=self.buffer_m_var, width=8)
-        self.buffer_spin.pack(side="left", padx=(8, 16))
-        ttk.Checkbutton(r4, text="Clear existing property folders before sorting", variable=self.clear_sorted_var).pack(side="left")
+        ttk.Label(sorting, text="Close-to-boundary distance (m):").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.buffer_spin = ttk.Spinbox(sorting, from_=0, to=5000, textvariable=self.buffer_m_var, width=8)
+        self.buffer_spin.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        self.clear_sorted_chk = ttk.Checkbutton(
+            sorting,
+            text="Clear existing property folders before sorting",
+            variable=self.clear_sorted_var,
+        )
+        self.clear_sorted_chk.grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(6, 0))
+
+        run = ttk.LabelFrame(frm, text="Run", padding=10)
+        run.pack(fill="x")
+        run.columnconfigure(0, weight=1)
 
         self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(frm, textvariable=self.status_var).pack(anchor="w")
+        ttk.Label(run, textvariable=self.status_var).grid(row=0, column=0, columnspan=4, sticky="w")
 
-        self.progress = ttk.Progressbar(frm, length=940, mode="determinate")
-        self.progress.pack(anchor="w", pady=(10, 6))
+        self.progress = ttk.Progressbar(run, length=940, mode="determinate")
+        self.progress.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 6))
 
         self.count_var = tk.StringVar(value="")
-        ttk.Label(frm, textvariable=self.count_var).pack(anchor="w")
+        ttk.Label(run, textvariable=self.count_var).grid(row=2, column=0, columnspan=4, sticky="w")
 
-        btns = ttk.Frame(frm)
-        btns.pack(anchor="e", pady=(14, 0), fill="x")
+        btns = ttk.Frame(run)
+        btns.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        btns.columnconfigure(0, weight=1)
 
-        ttk.Button(btns, text="Show Terminal / Logs", command=self.show_logs).pack(side="left")
-
-        self.start_btn = ttk.Button(btns, text="Start", command=self.start)
-        self.start_btn.pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="Show Terminal / Logs", command=self.show_logs).grid(row=0, column=0, sticky="w")
+        self.open_kmz_btn = ttk.Button(btns, text="Open geoset.kmz", command=self.open_last_kmz, state="disabled")
+        self.open_kmz_btn.grid(row=0, column=1, sticky="w", padx=(8, 0))
 
         self.cancel_btn = ttk.Button(btns, text="Cancel", command=self.cancel, state="disabled")
-        self.cancel_btn.pack(side="right")
+        self.cancel_btn.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self.start_btn = ttk.Button(btns, text="Start", command=self.start)
+        self.start_btn.grid(row=0, column=3, sticky="e", padx=(8, 0))
 
         self._on_sort_toggle()
 
@@ -1146,7 +1413,9 @@ class App:
         state = "normal" if enabled else "disabled"
         try:
             self.boundary_entry.configure(state=state)
+            self.boundary_btn.configure(state=state)
             self.buffer_spin.configure(state=state)
+            self.clear_sorted_chk.configure(state=state)
         except Exception:
             pass
 
@@ -1165,12 +1434,16 @@ class App:
         if p:
             self.boundary_kmz_var.set(p)
 
-    def _open_workflow_root(self):
-        self.workflow_root.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def _open_path(path: Path) -> None:
         try:
-            os.startfile(str(self.workflow_root))
+            os.startfile(str(path))
         except Exception:
             pass
+
+    def _open_workflow_root(self):
+        self.workflow_root.mkdir(parents=True, exist_ok=True)
+        self._open_path(self.workflow_root)
 
     def refresh_jobs(self, select_if_single: bool = False):
         self.workflow_root.mkdir(parents=True, exist_ok=True)
@@ -1214,10 +1487,7 @@ class App:
         if not job_dir.exists():
             messagebox.showerror("Missing job folder", f"Job folder not found:\n{job_dir}")
             return
-        try:
-            os.startfile(str(job_dir))
-        except Exception:
-            pass
+        self._open_path(job_dir)
 
     def create_new_job(self):
         self.workflow_root.mkdir(parents=True, exist_ok=True)
@@ -1228,10 +1498,16 @@ class App:
             self.refresh_jobs()
             self.selected_job_var.set(dlg.result_job_dir.name)
             self._on_job_selected()
-            try:
-                os.startfile(str(dlg.result_job_dir))
-            except Exception:
-                pass
+            self._open_path(dlg.result_job_dir)
+
+    def open_last_kmz(self):
+        if not self.last_kmz_path:
+            messagebox.showinfo("No KMZ yet", "Run a job to generate geoset.kmz first.")
+            return
+        if not self.last_kmz_path.exists():
+            messagebox.showerror("Missing KMZ", f"geoset.kmz not found:\n{self.last_kmz_path}")
+            return
+        self._open_path(self.last_kmz_path)
 
     # ---- logs ----
     def show_logs(self):
@@ -1263,6 +1539,8 @@ class App:
             return
 
         self.refresh_jobs()
+        self.last_kmz_path = None
+        self.open_kmz_btn.config(state="disabled")
 
         job_name = self.selected_job_var.get().strip()
         if not job_name:
@@ -1480,6 +1758,7 @@ class App:
                 stamped_files_resolver=stamped_resolver,
                 show_labels=True,
             )
+            self.q.put(("kmz_ready", str(kmz_out)))
 
             if sorting:
                 self.q.put(("log", "  [MATCH SUMMARY]"))
@@ -1508,6 +1787,9 @@ class App:
                     self.count_var.set(f"{d} / {t}")
                 elif kind == "log":
                     self._log(msg[1])
+                elif kind == "kmz_ready":
+                    self.last_kmz_path = Path(msg[1])
+                    self.open_kmz_btn.config(state="normal")
                 elif kind == "error":
                     self._finish_buttons()
                     self._log(f"[ERROR] {msg[1]}")
@@ -1532,8 +1814,8 @@ class App:
 
 def main():
     ensure_workflow_layout_and_drop_scripts()
-
-    root = tk.Tk()
+    root_cls = TkinterDnD.Tk if dnd_available() else tk.Tk
+    root = root_cls()
     try:
         style = ttk.Style()
         if "vista" in style.theme_names():
