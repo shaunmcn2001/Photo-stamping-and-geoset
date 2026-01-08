@@ -886,7 +886,7 @@ class PropertyMatcher:
         except Exception:
             res = []
 
-        if not res:
+        if res is None or len(res) == 0:
             return hits
 
         first = res[0]
@@ -1346,7 +1346,7 @@ class NewJobDialog:
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Photo Stamp + KMZ Builder")
+        self.root.title("Photo Processing")
         self.root.geometry("1020x620")
         self.root.resizable(False, False)
 
@@ -1378,7 +1378,7 @@ class App:
         frm = ttk.Frame(self.root, padding=14)
         frm.pack(fill="both", expand=True)
 
-        ttk.Label(frm, text="Photo Processing - Stamp + Geo KMZ", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        ttk.Label(frm, text="Photo Processing", font=("Segoe UI", 16, "bold")).pack(anchor="w")
 
         workflow = ttk.LabelFrame(frm, text="Workflow", padding=10)
         workflow.pack(fill="x", pady=(8, 8))
@@ -1503,8 +1503,16 @@ class App:
         summary = ttk.LabelFrame(frm, text="Summary", padding=10)
         summary.pack(fill="x", pady=(8, 0))
         summary.columnconfigure(0, weight=1)
-        self.summary_text = tk.Text(summary, height=5, wrap="word")
+        summary_body = ttk.Frame(summary)
+        summary_body.grid(row=0, column=0, sticky="ew")
+        summary_body.columnconfigure(0, weight=1)
+
+        self.summary_text = tk.Text(summary_body, height=5, wrap="word")
+        summary_scroll = ttk.Scrollbar(summary_body, orient="vertical", command=self.summary_text.yview)
+        self.summary_text.configure(yscrollcommand=summary_scroll.set)
+
         self.summary_text.grid(row=0, column=0, sticky="ew")
+        summary_scroll.grid(row=0, column=1, sticky="ns")
         self.summary_text.configure(state="disabled")
 
         self._on_sort_toggle()
